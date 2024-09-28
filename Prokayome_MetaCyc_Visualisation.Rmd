@@ -1,0 +1,158 @@
+---
+title: "Humann_Visualisation"
+author: "Catherine Purse"
+date: "2024-07-29"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+* Load libraries
+```{r packages, results='hide'}
+x <- c("ggplot2", "RColorBrewer", "tidyverse", "patchwork", "microViz", "dplyr", "tidyr", "ALDEx2", "CoDaSeq", "grafify")
+lapply(x, require, character.only = TRUE)
+```
+
+* Import data files and save as dataframes
+```{r}
+df_input_metadata = read.csv("./Metadata_6189_Batch2_250724.csv", 
+                               sep              = ",", 
+                               row.names        = 1,
+                               stringsAsFactors = FALSE)
+df_input_metadata[1:5, ]
+
+df_input_path = read.csv("./humann_joinedPathAb_CPM_250724.csv", 
+                         sep              = ",", 
+                         stringsAsFactors = FALSE, 
+                         row.names        = 1)
+df_input_path[1:5, 1:5]
+```
+
+```{r}
+# Clean up the rownames to extract the functional pathway codes
+df_input_path <- rownames_to_column(df_input_path, var = "Pathway")
+df_input_path <- separate(df_input_path, Pathway, into = c("Feature", "Feature_Description", "Taxa"), sep = "[:|]", extra = "merge", fill = "right")
+
+# Move any taxa information from Description to Taxa column
+df_input_path <- df_input_path %>%
+  mutate(
+    Taxa = ifelse(grepl("^g__", Feature_Description), Feature_Description, Taxa),
+    Feature_Description = ifelse(grepl("^g__", Feature_Description), "", Feature_Description)
+  )
+
+# Replace empty spaces with NA using dplyr's na_if()
+df_input_path$Feature_Description <- na_if(df_input_path$Feature_Description, "")
+```
+
+* Pivot dataframe
+```{r}
+df <- tidyr::pivot_longer(df_input_path, cols = starts_with("NHP"), names_to = "ID", values_to = "CPM")
+```
+
+* Import Metacyc pathway hierarchy data
+```{r}
+metacyc.pw <- read.csv("metacycpathway_hierarchy_edits.csv")
+```
+
+* Split metacyc.pw Feature column
+```{r}
+metacyc.pw <- separate(metacyc.pw, feature, into = c("Feature", "Feature_Description"), sep = ":", extra = "merge", fill = "right")
+```
+
+* Merge metacyc.pw and df
+```{r}
+new_df <- merge(metacyc.pw, df, by = "Feature", all.x = FALSE)
+
+new_df$Feature <- gsub('\"', '', new_df$Feature)
+```
+
+* Merge metadata and df
+```{r}
+meta <- rownames_to_column(df_input_metadata, var = "ID")
+df_meta <- merge(meta, new_df, var = "ID")
+```
+
+* Convert CPM to relative abundance
+```{r}
+rel_df_ii <- df_meta %>%
+  group_by(ID) %>%
+  mutate(across("CPM", ~ ./sum(.)))
+
+# Remove empty rows
+rel_df_iii <- filter(rel_df_ii, CPM != 0)
+```
+
+
+* Visualise abundance pathways
+```{r}
+# Make type a factor
+rel_df_iii$type <- factor(rel_df_iii$type, levels=c("J", "I", "C", "PC", "DC"))
+
+# Label function
+labels <- c(D = "Duodenum", J = "Jejunum", I = "Ileum", C = "Caecum", PC = "Proximal Colon", DC = "Distal Colon")
+
+# Order ids by age (using a unique identifier to account for duplicates in df)
+rel_df_iii <- rel_df_iii[order(rel_df_iii$age, rel_df_iii$id), ]
+rel_df_iii$id <- factor(rel_df_iii$id, levels = unique(rel_df_iii$id))
+
+cb_palette <- c("#ee8866", "#77aadd","#eedd88","#ffaabb","#99ddff","#44bb99", "#bbcc33","#cc99cc","#dddddd","#ccbbaa","#dd7788","#66ccee")
+
+overall_abundance <- ggplot(rel_df_iii, aes(x= id, y = CPM * 100, fill = level_1)) +
+  geom_bar(stat = "identity") + 
+  theme_light() +
+  theme(axis.text.x = element_text(angle=90, size=10, hjust=0.95, vjust=0.2), 
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        plot.title = element_text(face = "bold", size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background =element_rect(fill="grey"),
+        strip.text = element_text(size = 12, face = "bold"),  # Adjust the size of facet labels
+        legend.text.align = 0, 
+        legend.text = element_text(size=10),
+        legend.title = element_text(size=12),
+        legend.position = "right") +
+#  guides(fill = guide_legend(nrow = 3)) +
+  scale_fill_manual(values = cb_palette) +
+  facet_grid(~ type, space ="free", scales = "free", labeller = labeller(type = labels)) +
+    xlab("Age (Years)") + ylab("Relative abundance (%)") +
+  labs(fill = "MetaCyc Feature") #size legend title
+
+overall_abundance
+
+# Make agegroup a factor in the df
+rel_df_iii$agegroup <- factor(rel_df_iii$agegroup, levels=c("Young", "Adult", "Aged"))
+
+# Create the age group annotations plot
+age_group_annotations <- ggplot(rel_df_iii, aes(x = id, fill = agegroup)) +
+  geom_tile(aes(y = -5, height = 3)) +  # Adjust height to fit beneath the main plot
+  scale_fill_manual(values = c("#f4e285", "#f4a259", "#8cb369")) +  # Customize colors as needed
+  facet_grid(~ type, space = "free", scales = "free") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        strip.text = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title = element_blank(),
+        panel.spacing = unit(0.25, "lines"),
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10)) +
+  guides(fill=guide_legend(title="Age Group"))
+
+# Combine the two plots using patchwork
+combined_plot <- overall_abundance / age_group_annotations + plot_layout(heights = c(10, 1))
+combined_plot
+```
+
+* Save as 300 dpi tiff
+```{r}
+# Save the bar plot
+folder_path <- "C:/Users/purse/OneDrive - Norwich BioScience Institutes/Results/NHP Bioinformatics/6189_Metagenomicsanalysis/Humann_FunctionalAnalysis/NewAnalysis_250724/Plots"
+tiff(file.path(folder_path, "Metacyc_ab_GIT.tiff"), units="in", width=16, height=7,  res=300)
+plot(combined_plot)
+dev.off()
+```

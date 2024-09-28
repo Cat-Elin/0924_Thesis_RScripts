@@ -1,0 +1,148 @@
+---
+title: "Obese_Functional"
+author: "Catherine Purse"
+date: "2024-08-12"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+* Load libraries
+```{r packages, results='hide'}
+x <- c("ggplot2", "RColorBrewer", "tidyverse", "patchwork", "microViz", "dplyr", "tidyr", "ALDEx2", "CoDaSeq", "grafify")
+lapply(x, require, character.only = TRUE)
+```
+
+* Import data files and save as dataframes
+```{r}
+df_input_metadata = read.csv("./Obese_Metadata_120824.csv", 
+                               sep              = ",", 
+                               row.names        = 1,
+                               stringsAsFactors = FALSE)
+df_input_metadata[1:5, ]
+
+df_input_path = read.csv("./ob_humann_joinedPathAb_CPM_020824.csv", 
+                         sep              = ",", 
+                         stringsAsFactors = FALSE, 
+                         row.names        = 1)
+df_input_path[1:5, 1:5]
+
+# Average duplicate samples from obese mother & daughter
+i <- c(2:4)
+df_input_path[,i] <- apply(df_input_path[,i], 2, function(x) as.numeric(as.character(x)))
+
+NHP_M972 <- rowMeans(df_input_path[ , c(2,3)], na.rm=TRUE)
+NHP_M972H <- rowMeans(df_input_path[ , c(4,5)], na.rm=TRUE)
+
+df_input_path$NHP_M972 <- NHP_M972
+df_input_path$NHP_M972H <- NHP_M972H
+df_input_path <- df_input_path[, -(1:4)]
+View(df_input_path)
+
+#Remove columns of samples not required in this analysis
+df_input_path <- df_input_path[, !names(df_input_path) %in% c("NHP_BD566GDH_Faecal_S7_L004", "NHP_I150E_Faecal_S18_L004")]
+
+
+```
+
+```{r}
+# Clean up the rownames to extract the functional pathway codes
+df_input_path <- rownames_to_column(df_input_path, var = "Pathway")
+df_input_path <- separate(df_input_path, Pathway, into = c("Feature", "Feature_Description", "Taxa"), sep = "[:|]", extra = "merge", fill = "right")
+
+# Move any taxa information from Description to Taxa column
+df_input_path <- df_input_path %>%
+  mutate(
+    Taxa = ifelse(grepl("^g__", Feature_Description), Feature_Description, Taxa),
+    Feature_Description = ifelse(grepl("^g__", Feature_Description), "", Feature_Description)
+  )
+
+# Replace empty spaces with NA using dplyr's na_if()
+df_input_path$Feature_Description <- na_if(df_input_path$Feature_Description, "")
+```
+
+* Pivot dataframe
+```{r}
+df <- tidyr::pivot_longer(df_input_path, cols = starts_with("NHP"), names_to = "ID", values_to = "CPM")
+```
+
+* Import Metacyc pathway hierarchy data
+```{r}
+metacyc.pw <- read.csv("metacycpathway_hierarchy_edits.csv")
+```
+
+* Split metacyc.pw Feature column
+```{r}
+metacyc.pw <- separate(metacyc.pw, feature, into = c("Feature", "Feature_Description"), sep = ":", extra = "merge", fill = "right")
+```
+
+* Merge metacyc.pw and df
+```{r}
+new_df <- merge(metacyc.pw, df, by = "Feature", all.x = FALSE)
+
+new_df$Feature <- gsub('\"', '', new_df$Feature)
+```
+
+* Merge metadata and df
+```{r}
+meta <- rownames_to_column(df_input_metadata, var = "ID")
+df_meta <- merge(meta, new_df, var = "ID")
+```
+
+* Convert CPM to relative abundance
+```{r}
+rel_df_ii <- df_meta %>%
+  group_by(ID) %>%
+  mutate(across("CPM", ~ ./sum(.)))
+
+# Remove empty rows
+rel_df_iii <- filter(rel_df_ii, CPM != 0)
+```
+
+
+* Visualise abundance pathways
+```{r}
+# Make type a factor
+rel_df_iii$type <- factor(rel_df_iii$type, levels=c("J", "I", "C", "PC", "DC"))
+
+# Label function
+labels <- c(D = "Duodenum", J = "Jejunum", I = "Ileum", C = "Caecum", PC = "Proximal Colon", DC = "Distal Colon")
+
+# Order ids by age (using a unique identifier to account for duplicates in df)
+rel_df_iii <- rel_df_iii[order(rel_df_iii$age, rel_df_iii$id), ]
+rel_df_iii$id <- factor(rel_df_iii$id, levels = unique(rel_df_iii$id))
+
+cb_palette <- c("#77aadd","#eedd88","#ffaabb","#99ddff","#44bb99", "#bbcc33","#cc99cc","#dddddd","#ccbbaa","#dd7788","#66ccee")
+
+overall_abundance <- ggplot(rel_df_iii, aes(x= id, y = CPM * 100, fill = level_1)) +
+  geom_bar(stat = "identity") + 
+  theme_light() +
+  theme(axis.text.x = element_text(angle=90, size=12, hjust=0.95, vjust=0.2), 
+        axis.text.y = element_text(size=12),
+        axis.title = element_text(size = 12, color = "black"),
+        plot.title = element_text(face = "bold"),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background =element_rect(fill="grey"),
+        strip.text = element_text(size = 12),  # Adjust the size of facet labels
+        legend.text.align = 0, 
+        legend.text = element_text(size=12),
+        legend.title = element_text(size=14),
+        legend.position = "right") +
+  scale_fill_manual(values = cb_palette) +
+  facet_grid(~ agegroup, space ="free", scales = "free", labeller = labeller(type = labels)) +
+    xlab("Age (Years)") + ylab("Relative abundance (%)") +
+  labs(fill = "MetaCyc Feature") #size legend title
+
+overall_abundance
+```
+
+* Save as 300 dpi tiff
+```{r}
+tiff(file.path(folder_path, "Metacyc_ab_obese.tiff"), units="in", width=20, height=9, res=300)
+plot(overall_abundance)
+dev.off()
+```

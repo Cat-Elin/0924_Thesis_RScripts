@@ -1,0 +1,925 @@
+---
+title: "Mycobiome_Taxonomy_Visualisation"
+author: "Catherine Purse"
+date: "2023-12-08"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r packages, results='hide'}
+x <- c("phyloseq","RColorBrewer", "tidyverse", "patchwork", "microViz", "microbiome", "MicEco", "DatawRappr", "extrafont")
+lapply(x, require, character.only = TRUE)
+```
+
+# Colour palette
+```{r}
+cb_palette <- c("#ee8866", "#77aadd","#d3d3d3","#FDF28E","#8ED29B","#bbccee", "#AFC30A","#cc99cc","#C1E49C","#dd7788", "#009E73")
+```
+
+# Load data
+
+* Load ASV/Taxa/Meta tables
+```{r}
+ASV <- read.csv("OTU-table.csv")
+tax <- read.csv("taxonomy-table.csv")
+meta <- read.csv("Metadata-file.csv")
+```
+
+* Reformat ASV table (turn ASV column into rows) and strip white space
+```{r}
+rownames(ASV) <- paste0("ASV", 1:nrow(ASV))
+ASV <- subset(ASV, select = -c(X.NAME))
+#View(ASV)
+
+#strip white space
+ASV <- ASV %>%
+  mutate(across(where(is.character), ~str_trim(., side = "both")))
+```
+
+* Same for taxonomy table
+```{r}
+#do the same for taxonomy table (need rownames to match)
+rownames(tax) <- paste0("ASV", 1:nrow(tax))
+tax <- subset(tax, select = -c(X.TAXONOMY))
+#View(tax)
+
+#strip white space
+#tax <- tax %>%
+#  mutate(across(where(is.character), ~str_trim(., side = "both")))
+
+tax[] <- lapply(tax, function(x) if(is.character(x)) gsub("\\s+", " ", x))
+
+#tax$Kingdom <- gsub("\\s+", " ", tax$Kingdom)
+#tax$Phylum <- gsub("\\s+", " ", tax$Phylum)
+
+taxa <- unique(tax$Species)
+taxa
+```
+
+* Same for metadata
+```{r}
+meta_df <- meta %>%
+  column_to_rownames("X.NAME")
+#View(meta_df)
+
+#strip white space
+#strip white space
+meta_df <- meta_df %>%
+  mutate(across(where(is.character), ~str_trim(., side = "both")))
+#View(meta_df)
+```
+
+## Create phyloseq object
+* Create phyloseq object
+```{r}
+#turn df in to matrices (required for phyloseq)
+asv_mat <- as.matrix(ASV)
+tax_mat <- as.matrix(tax)
+
+#transform into phyloseq objects
+ASV_ps <- otu_table(asv_mat, taxa_are_rows = TRUE)
+tax_ps <- tax_table(tax_mat)
+samples <- sample_data(meta_df)
+
+#combine!
+myco <- phyloseq(ASV_ps, tax_ps, samples)
+myco
+```
+
+* Prune samples <10000 reads (as recommended in QIB best practice)
+```{r}
+myco_10k <- prune_samples(sample_sums(myco) > 10000, myco)
+myco_10k
+```
+
+* Clean data of outliers and unclassified ASVs (Kingdom Level)
+```{r}
+#remove NHP 17 (M497BDC) as ID presented with diarrhoea
+myco_10k_noout <- subset_samples(myco_10k, sample_names(myco_10k) != "NHP17Caecum" & sample_names(myco_10k) != "NHP17PC" & sample_names(myco_10k) != "NHP17DC")
+sample_names(myco_10k_noout)
+myco_10k_noout
+
+# Remove unidentified ASVs at Kingdom level
+myco_10k_noout <- subset_taxa(myco_10k_noout, Kingdom != " unclassified_Root ")
+
+# Check unique Phylum
+unique_phylum <- unique(tax_table(myco_10k_noout)[, 'Phylum'])
+
+# Print or view the unique data
+print(unique_phylum)
+```
+
+* Transform to relative abundance
+```{r}
+myco_10k_noout <- transform_sample_counts(myco_10k_noout, function(x) x/sum(x))
+```
+
+* Filter low abundant strain (group taxa with less than 0.01% abundance as NA)
+```{r}
+#myco_10k_noout <- ps_prune(myco_10k_noout, min.abundance = 0.0001)
+```
+
+* Export phyloseq object for other scripts 
+```{r}
+saveRDS(myco_10k_noout, file = "myco_phyloseq.rds")
+```
+
+
+# PHYLA // SPATIAL - Stacked Bar Chart
+
+* Agglomorate to phyla and transform sample counts
+```{r}
+myco_phy <- tax_glom(myco_10k_noout, "Phylum")
+```
+
+* Transfrom physeq object into df for plotting
+```{r}
+myco_phy_df <- psmelt(myco_phy)
+trimws(myco_phy_df)
+myco_phy_df
+```
+
+* Find number of unique taxa
+```{r}
+length(unique(myco_phy_df$Phylum))
+```
+
+* Rename NA/unidentified/unclassified taxa and improve aesthetics
+```{r}
+# Trim whitespaces and filter for unclassified/unidentified Fungi
+y <- myco_phy_df[trimws(myco_phy_df$Phylum) == 'unclassified_Fungi',]$Phylum
+z <- myco_phy_df[trimws(myco_phy_df$Phylum) == 'unidentified',]$Phylum
+
+# Combine the vectors
+Unclassified <- c(y, z)
+
+# Rename
+myco_phy_df[myco_phy_df$Phylum %in% Unclassified,]$Phylum <- ' Unclassified'
+
+# replace _ with " "
+myco_phy_df$Phylum<-gsub("_"," ",as.character(myco_phy_df$Phylum))
+
+# check tax_table again
+View(myco_phy_df)
+```
+
+* Make age a factor in the df (i.e. change order of facets (flip aged/mid/young) in next step)
+```{r}
+myco_phy_df$type <- factor(myco_phy_df$type, levels=c("Duodenum", "Jejunum", "Ileum", "Caecum", "ProxColon", "DistalColon"))
+
+#change facet names
+facet_names <- list('Duodenum'='Duodenum',
+                    'Jejunum'='Jejunum',
+                    'Ileum'='Ileum',
+                    'Caecum'='Caecum',
+                    'ProxColon'='PC',
+                    'DistalColon'='DC')
+#create label function
+group_labeller <- function(variable,value){
+  return(facet_names[value])
+}
+
+# Order ids by age (using a unique identifier to account for duplicates in df)
+myco_phy_df <- myco_phy_df[order(myco_phy_df$age, myco_phy_df$name), ]
+myco_phy_df$name <- factor(myco_phy_df$name, levels = unique(myco_phy_df$name))
+```
+
+* Improve aesthetics
+```{r}
+# replace _ with " "
+myco_phy_df$Phylum<-gsub("_"," ",as.character(myco_phy_df$Phylum))
+```
+
+* Create stacked bar graph
+```{r}
+phy_plot <- ggplot(myco_phy_df, aes(x = name, y = Abundance *100, fill = Phylum)) +
+  theme_light() +
+  geom_col() +
+  facet_grid(~ type, space ="free", scales = "free", labeller = labeller(type = group_labeller)) +
+  ggtitle("Phylum") +
+  theme(axis.text.x = element_text(angle=90, size=10, hjust=0.95, vjust=0.2), 
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        plot.title = element_text(face = "bold", size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background =element_rect(fill="grey"),
+        strip.text = element_text(size = 12, face = "bold"),  # Adjust the size of facet labels
+        legend.text.align = 0, 
+        legend.text = element_text(size=10),
+        legend.title = element_text(size=12),
+        legend.position = "bottom") +
+  scale_fill_manual(values = cb_palette) +
+  xlab("Sample ID") + ylab("Relative Abundance (%)")
+phy_plot
+```
+
+* Export graph
+```{r}
+tiff(file.path(folder_path, "Phylum_StackedBar.tiff"), units="in", width=10, height=5, res=300)
+plot(phy_plot)
+dev.off()
+```
+
+
+# CLASS // SPATIAL - Stacked Bar Chart
+
+* Agglomorate to class
+```{r}
+myco_class <- tax_glom(myco_10k_noout, "Class")
+```
+
+* Find number of unique taxa
+```{r}
+myco_class_df_all <- psmelt(myco_class)
+length(unique(myco_class_df_all$Class))
+```
+
+* Show only top 10 most abundant class
+```{r}
+TopNOTUs.class <- names(sort(taxa_sums(myco_class), TRUE)[1:10])
+class10   <- prune_taxa(TopNOTUs.class, myco_class)
+class10
+```
+
+* Transfrom physeq object into df for plotting
+```{r}
+myco_class_df <- psmelt(class10)
+trimws(myco_class_df)
+```
+
+* Rename NA/unidentified/unclassified taxa
+```{r}
+# Check if 'NA' is present in the Class column
+if ('NA' %in% myco_class_df$Class) {
+  # Find class that are NA and rename as 'Other'
+  x <- myco_class_df[myco_class_df$Class == 'NA',]$Class
+  
+  # Combine the vectors
+  Unidentified <- c(x)
+  
+  # Replace 'NA' with 'Other'
+  myco_class_df[myco_class_df$Class %in% Unidentified,]$Class <- ' Other'
+} else {
+  # If 'NA' is not present, provide a message
+  print("No 'NA' values found in the Class column.")
+}
+
+if ('unclassified_Fungi' %in% myco_class_df$Class || 'unidentified' %in% myco_class_df$Class) {
+  # Trim whitespaces and filter for unclassified/unidentified   Fungi
+  y <- myco_class_df[trimws(myco_class_df$Class) == 'unclassified_Fungi',]$Class
+  z <- myco_class_df[trimws(myco_class_df$Class) == 'unidentified',]$Class
+
+  # Combine the vectors
+  Unclassified <- c(y, z)
+
+  # Rename
+  myco_class_df[myco_class_df$Class %in% Unclassified,]$Class <- ' Unclassified'
+} else {
+  # If 'NA' or 'unclassified' is not present, provide a message or take alternative action
+  print("No 'NA' or 'unclassified' values found in the Class column.")
+}
+```
+
+* Make type a factor in the df (i.e. change order of facets in next step) and make label function for regions
+```{r}
+myco_class_df$type <- factor(myco_class_df$type, levels=c("Duodenum", "Jejunum", "Ileum", "Caecum", "ProxColon", "DistalColon"))
+
+#change facet names
+facet_names <- list('Duodenum'='Duodenum',
+                    'Jejunum'='Jejunum',
+                    'Ileum'='Ileum',
+                    'Caecum'='Caecum',
+                    'ProxColon'='PC',
+                    'DistalColon'='DC')
+#create label function
+group_labeller <- function(variable,value){
+  return(facet_names[value])
+}
+
+# Order ids by age (using a unique identifier to account for duplicates in df)
+myco_class_df <- myco_class_df[order(myco_class_df$age, myco_class_df$name), ]
+myco_class_df$name <- factor(myco_class_df$name, levels = unique(myco_class_df$name))
+```
+
+* Improve aesthetics
+```{r}
+# replace _ with " "
+myco_class_df$Class<-gsub("_"," ",as.character(myco_class_df$Class))
+
+#Rename 'unclassified Ascomycota'
+b <- myco_class_df[trimws(myco_class_df$Class) == 'unclassified Ascomycota',]$Class
+
+myco_class_df[myco_class_df$Class %in% b,]$Class <- ' Unclassified Ascomycota'
+```
+
+* Create stacked bar graph
+```{r}
+class_plot <- ggplot(myco_class_df, aes(x = name, y = Abundance*100, fill = Class)) +
+  theme_light() +
+  geom_col() +
+  facet_grid(~ type, space ="free", scales = "free", labeller = labeller(type = group_labeller)) +
+  ggtitle("Class") +
+  theme(axis.text.x = element_text(angle=90, size=10, hjust=0.95, vjust=0.2), 
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        plot.title = element_text(face = "bold", size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background =element_rect(fill="grey"),
+        strip.text = element_text(size = 12, face = "bold"),  # Adjust the size of facet labels
+        legend.text.align = 0, 
+        legend.text = element_text(size=10),
+        legend.title = element_text(size=12),
+        legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 3)) +
+  scale_fill_manual(values = cb_palette) +
+  xlab("Sample ID") + ylab("Relative Abundance (%)")
+class_plot
+```
+
+* Export graph
+```{r}
+tiff(file.path(folder_path, "Class_StackedBar.tiff"), units="in", width=10, height=5, res=300)
+plot(class_plot)
+dev.off()
+```
+
+# ORDER // SPATIAL - Stacked Bar Chart
+
+* Agglomorate to order
+```{r}
+myco_order <- tax_glom(myco_10k_noout, "Order")
+```
+
+* Find number of unique taxa
+```{r}
+myco_ord_df_all <- psmelt(myco_order)
+length(unique(myco_ord_df_all$Order))
+```
+
+* Show only top 10 most abundant order
+```{r}
+TopNOTUs.order <- names(sort(taxa_sums(myco_order), TRUE)[1:10])
+order10   <- prune_taxa(TopNOTUs.order, myco_order)
+order10
+```
+
+* Transfrom physeq object into df for plotting
+```{r}
+myco_order_df <- psmelt(order10)
+trimws(myco_order_df)
+```
+
+* Rename NA/unidentified/unclassified taxa
+```{r}
+# Check if 'NA' is present in the Order column
+if ('NA' %in% myco_order_df$Order) {
+  # Find class that are NA and rename as 'Other'
+  x <- myco_order_df[myco_order_df$Order == 'NA',]$Order
+  
+  # Combine the vectors
+  Unidentified <- c(x)
+  
+  # Replace 'NA' with 'Other'
+  myco_order_df[myco_order_df$Order %in% Unidentified,]$Order <- 'Other'
+} else {
+  # If 'NA' is not present, provide a message or take alternative action
+  print("No 'NA' values found in the Order column.")
+}
+
+if ('unclassified_Fungi' %in% myco_order_df$Order || 'unidentified' %in% myco_order_df$Order) {
+  # Trim whitespaces and filter for unclassified/unidentified   Fungi
+  y <- myco_order_df[trimws(myco_order_df$Order) == 'unclassified_Fungi',]$Order
+  z <- myco_order_df[trimws(myco_order_df$Order) == 'unidentified',]$Order
+
+  # Combine the vectors
+  Unclassified <- c(y, z)
+
+  # Rename
+  myco_order_df[myco_order_df$Order %in% Unclassified,]$Order <- 'Unclassified'
+} else {
+  # If 'NA' or 'unclassified' is not present, provide a message or take alternative action
+  print("No 'NA' or 'unclassified' values found in the Order column.")
+}
+```
+
+* Make age a factor in the df (i.e. change order of facets (flip aged/mid/young) in next step)
+```{r}
+myco_order_df$type <- factor(myco_order_df$type, levels=c("Duodenum", "Jejunum", "Ileum", "Caecum", "ProxColon", "DistalColon"))
+
+#change facet names
+facet_names <- list('Duodenum'='Duodenum',
+                    'Jejunum'='Jejunum',
+                    'Ileum'='Ileum',
+                    'Caecum'='Caecum',
+                    'ProxColon'='PC',
+                    'DistalColon'='DC')
+#create label function
+group_labeller <- function(variable,value){
+  return(facet_names[value])
+}
+
+# Order ids by age (using a unique identifier to account for duplicates in df)
+myco_order_df <- myco_order_df[order(myco_order_df$age, myco_order_df$name), ]
+myco_order_df$name <- factor(myco_order_df$name, levels = unique(myco_order_df$name))
+
+# Rename Mid as Adult
+myco_order_df$agegroup<-gsub("Mid","Adult",as.character(myco_order_df$agegroup))
+
+# Reorder agegroup
+myco_order_df$agegroup <- factor(myco_order_df$agegroup, levels = c("Young", "Adult", "Aged"))
+```
+
+* Improve aesthetics
+```{r}
+# replace _ with " "
+myco_order_df$Order<-gsub("_"," ",as.character(myco_order_df$Order))
+
+#Rename 'Cystobasidiomycetes ord Incertae sedis'
+a <- myco_order_df[trimws(myco_order_df$Order) == 'Cystobasidiomycetes ord Incertae sedis',]$Order
+
+myco_order_df[myco_order_df$Order %in% a,]$Order <- ' Incertae sedis \n(Class: Cystobasidiomycetes)'
+```
+
+* Create stacked bar graph
+```{r}
+order_plot <- ggplot(myco_order_df, aes(x = name, y = Abundance*100, fill = Order)) +
+theme_light() +
+  geom_col() +
+  facet_grid(~ type, space ="free", scales = "free", labeller = labeller(type = group_labeller)) +
+  ggtitle("Order") +
+  theme(axis.text.x = element_text(angle=90, size=10, hjust=0.95, vjust=0.2), 
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        plot.title = element_text(face = "bold", size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background =element_rect(fill="grey"),
+        strip.text = element_text(size = 12, face = "bold"),  # Adjust the size of facet labels
+        legend.text.align = 0, 
+        legend.text = element_text(size=10),
+        legend.title = element_text(size=12),
+        legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 3)) +
+  scale_fill_manual(values = cb_palette) +
+  xlab("Sample ID") + ylab("Relative Abundance (%)")
+order_plot
+
+# Create the age group annotations plot
+order_age_group_annotations <- ggplot(myco_order_df, aes(x = name, fill = agegroup)) +
+  geom_tile(aes(y = -5, height = 3)) +  # Adjust height to fit beneath the main plot
+  scale_fill_manual(values = c("#f4e285", "#f4a259", "#8cb369")) +  # Customize colors as needed
+  facet_grid(~ type, space = "free", scales = "free") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        strip.text = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title = element_blank(),
+        panel.spacing = unit(0.25, "lines"),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 16)) +
+  guides(fill=guide_legend(title="Age Group"))
+
+# Combine the two plots using patchwork
+order_combined_plot <- order_plot / order_age_group_annotations + plot_layout(heights = c(10, 1))
+# Adjust heights as needed
+print(order_combined_plot)
+```
+
+* Export graph
+```{r}
+tiff(file.path(folder_path, "Order_StackedBar.tiff"), units="in", width=10, height=5, res=300)
+plot(order_plot)
+dev.off()
+```
+
+* Patchwork plot for Phyla, Class, Order
+```{r}
+tax_plot1 <- phy_plot / class_plot / order_plot + order_age_group_annotations +
+  plot_layout(heights = c(10, 10, 10, 1))
+tax_plot1
+
+tiff(file.path(folder_path, "Mycobiome_Tax1.tiff"), units="in", width=8.27, height=13, res=300)
+plot(tax_plot1)
+dev.off()
+```
+
+# FAMILY // SPATIAL - Stacked Bar Chart
+
+* Agglomorate to family
+```{r}
+myco_fam <- tax_glom(myco_10k_noout, "Family")
+```
+
+* Find number of unique taxa
+```{r}
+myco_fam_df_all <- psmelt(myco_fam)
+length(unique(myco_fam_df_all$Family))
+```
+
+* Show only top 10 most abundant family
+```{r}
+TopNOTUs.fam <- names(sort(taxa_sums(myco_fam), TRUE)[1:10])
+family10   <- prune_taxa(TopNOTUs.fam, myco_fam)
+family10
+```
+
+* Transfrom physeq object into df for plotting
+```{r}
+myco_fam_df <- psmelt(family10)
+trimws(myco_fam_df)
+```
+
+* Rename NA/unidentified/unclassified taxa
+```{r}
+# Check if 'NA' is present in the Family column
+if ('NA' %in% myco_fam_df$Family) {
+  # Find family that are NA and rename as 'Other'
+  x <- myco_fam_df[myco_fam_df$Family == 'NA',]$Family
+  
+  # Combine the vectors
+  Unidentified <- c(x)
+  
+  # Replace 'NA' with 'Other'
+  myco_fam_df[myco_fam_df$Family %in% Unidentified,]$Family <- 'Other'
+} else {
+  # If 'NA' is not present, provide a message or take alternative action
+  print("No 'NA' values found in the Family column.")
+}
+
+if ('unclassified_Fungi' %in% myco_fam_df$Family || 'unidentified' %in% myco_fam_df$Family) {
+  # Trim whitespaces and filter for unclassified/unidentified   Fungi
+  y <- myco_fam_df[trimws(myco_fam_df$Family) == 'unclassified_Fungi',]$Family
+  z <- myco_fam_df[trimws(myco_fam_df$Family) == 'unidentified',]$Family
+
+  # Combine the vectors
+  Unclassified <- c(y, z)
+
+  # Rename
+  myco_fam_df[myco_fam_df$Family %in% Unclassified,]$Family <- 'Unclassified'
+} else {
+  # If 'NA' or 'unclassified' is not present, provide a message or take alternative action
+  print("No 'NA' or 'unclassified' values found in the Family column.")
+}
+```
+
+* make age a factor in the df (i.e. change order of facets (flip aged/mid/young) in next step)
+```{r}
+myco_fam_df$type <- factor(myco_fam_df$type, levels=c("Duodenum", "Jejunum", "Ileum", "Caecum", "ProxColon", "DistalColon"))
+
+#change facet names
+facet_names <- list('Duodenum'='Duodenum',
+                    'Jejunum'='Jejunum',
+                    'Ileum'='Ileum',
+                    'Caecum'='Caecum',
+                    'ProxColon'='Proximal Colon',
+                    'DistalColon'='Distal Colon')
+#create label function
+group_labeller <- function(variable,value){
+  return(facet_names[value])
+}
+
+# Order ids by age (using a unique identifier to account for duplicates in df)
+myco_fam_df <- myco_fam_df[order(myco_fam_df$age, myco_fam_df$name), ]
+myco_fam_df$name <- factor(myco_fam_df$name, levels = unique(myco_fam_df$name))
+```
+
+* Improve aesthetics
+```{r}
+# replace _ with " "
+myco_fam_df$Family<-gsub("_"," ",as.character(myco_fam_df$Family))
+```
+
+* Create stacked bar graph
+```{r}
+fam_plot <- ggplot(myco_fam_df, aes(x = name, y = Abundance*100, fill = Family)) +
+theme_light() +
+  geom_col() +
+  facet_grid(~ type, space ="free", scales = "free", labeller = labeller(type = group_labeller)) +
+  ggtitle("Family") +
+  theme(axis.text.x = element_text(angle=90, size=10, hjust=0.95, vjust=0.2), 
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        plot.title = element_text(face = "bold", size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background =element_rect(fill="grey"),
+        strip.text = element_text(size = 12, face = "bold"),  # Adjust the size of facet labels
+        legend.text.align = 0, 
+        legend.text = element_text(size=10),
+        legend.title = element_text(size=12),
+        legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 3)) +
+  scale_fill_manual(values = cb_palette) +
+  xlab("Sample ID") + ylab("Relative Abundance (%)")
+fam_plot
+```
+
+* Export graph
+```{r}
+tiff(file.path(folder_path, "Family_StackedBar.tiff"), units="in", width=10, height=5, res=300)
+plot(fam_plot)
+dev.off()
+```
+
+
+
+# GENUS // SPATIAL - Stacked Bar Chart
+
+* Agglomorate to genus
+```{r}
+myco_gen <- tax_glom(myco_10k_noout, "Genus")
+```
+
+* Find number of unique taxa
+```{r}
+myco_gen_df_all <- psmelt(myco_gen)
+length(unique(myco_gen_df_all$Genus))
+```
+
+* Show only top 10 most abundant genus
+```{r}
+TopNOTUs.gen <- names(sort(taxa_sums(myco_gen), TRUE)[1:10])
+genus10   <- prune_taxa(TopNOTUs.gen, myco_gen)
+```
+
+* Transfrom physeq object into df for plotting
+```{r}
+myco_gen_df <- psmelt(genus10)
+trimws(myco_gen_df)
+myco_gen_df
+```
+
+* Rename NA/unidentified/unclassified taxa
+```{r}
+# Check if 'NA' is present in the Genus column
+if ('NA' %in% myco_gen_df$Genus) {
+  # Find genus that are NA and rename as 'Other'
+  x <- myco_gen_df[myco_gen_df$Genus == 'NA',]$Genus
+  
+  # Combine the vectors
+  Unidentified <- c(x)
+  
+  # Replace 'NA' with 'Other'
+  myco_gen_df[myco_gen_df$Genus %in% Unidentified,]$Genus <- 'Other'
+} else {
+  # If 'NA' is not present, provide a message or take alternative action
+  print("No 'NA' values found in the Genus column.")
+}
+
+if ('unclassified_Fungi' %in% myco_gen_df$Genus || 'unidentified' %in% myco_gen_df$Genus) {
+  # Trim whitespaces and filter for unclassified/unidentified   Fungi
+  y <- myco_gen_df[trimws(myco_gen_df$Genus) == 'unclassified_Fungi',]$Genus
+  z <- myco_gen_df[trimws(myco_gen_df$Genus) == 'unidentified',]$Genus
+
+  # Combine the vectors
+  Unclassified <- c(y, z)
+
+  # Rename
+  myco_gen_df[myco_gen_df$Genus %in% Unclassified,]$Genus <- 'Unclassified'
+} else {
+  # If 'NA' or 'unclassified' is not present, provide a message or take alternative action
+  print("No 'NA' or 'unclassified' values found in the Genus column.")
+}
+```
+
+* Improve aesthetics
+```{r}
+# replace _ with " "
+myco_gen_df$Genus<-gsub("_"," ",as.character(myco_gen_df$Genus))
+```
+
+* make age a factor in the df (i.e. change order of facets (flip aged/mid/young) in next step)
+```{r}
+myco_gen_df$type <- factor(myco_gen_df$type, levels=c("Duodenum", "Jejunum", "Ileum", "Caecum", "ProxColon", "DistalColon"))
+
+#change facet names
+facet_names <- list('Duodenum'='Duodenum',
+                    'Jejunum'='Jejunum',
+                    'Ileum'='Ileum',
+                    'Caecum'='Caecum',
+                    'ProxColon'='PC',
+                    'DistalColon'='DC')
+#create label function
+group_labeller <- function(variable,value){
+  return(facet_names[value])
+}
+
+# Order ids by age (using a unique identifier to account for duplicates in df)
+myco_gen_df <- myco_gen_df[order(myco_gen_df$age, myco_gen_df$name), ]
+myco_gen_df$name <- factor(myco_gen_df$name, levels = unique(myco_gen_df$name))
+
+# Rename unclassified Kazachstania as Arxiozyma
+myco_gen_df$Genus<-gsub("Kazachstania","Arxiozyma",as.character(myco_gen_df$Genus))
+```
+
+* Create stacked bar graph
+```{r}
+gen_plot <- ggplot(myco_gen_df, aes(x = name, y = Abundance*100, fill = Genus)) +
+theme_light() +
+  geom_col() +
+  facet_grid(~ type, space ="free", scales = "free", labeller = labeller(type = group_labeller)) +
+  ggtitle("Genus") +
+  theme(axis.text.x = element_text(angle=90, size=10, hjust=0.95, vjust=0.2), 
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        plot.title = element_text(face = "bold", size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background =element_rect(fill="grey"),
+        strip.text = element_text(size = 12, face = "bold"),  # Adjust the size of facet labels
+        legend.text.align = 0, 
+        legend.text = element_text(size=10),
+        legend.title = element_text(size=12),
+        legend.position = "bottom") +
+  scale_fill_manual(values = cb_palette) +
+  xlab("Sample ID") + ylab("Relative Abundance (%)")
+gen_plot
+```
+
+* Export graph
+```{r}
+tiff(file.path(folder_path, "Genus_StackedBar.tiff"), units="in", width=10, height=5, res=300)
+plot(gen_plot)
+dev.off()
+```
+
+
+
+# SPECIES // SPATIAL - Stacked Bar Chart
+
+* Agglomorate to species
+```{r}
+myco_sp <- tax_glom(myco_10k_noout, "Species")
+```
+
+
+* Show only top 10 most abundant species
+```{r}
+TopNOTUs.sp <- names(sort(taxa_sums(myco_sp), TRUE)[1:10])
+sp10   <- prune_taxa(TopNOTUs.sp, myco_sp)
+sp10
+```
+
+* Transfrom physeq object into df for plotting
+```{r}
+myco_sp_df <- psmelt(sp10)
+trimws(myco_sp_df)
+```
+
+* Rename NA/unidentified/unclassified taxa
+```{r}
+# Check if 'NA' is present in the Species column
+if ('NA' %in% myco_sp_df$Species) {
+  # Find genus that are NA and rename as 'Other'
+  x <- myco_sp_df[myco_sp_df$Species == 'NA',]$Species
+  
+  # Combine the vectors
+  Unidentified <- c(x)
+  
+  # Replace 'NA' with 'Other'
+  myco_sp_df[myco_sp_df$Species %in% Unidentified,]$Species <- 'Other'
+} else {
+  # If 'NA' is not present, provide a message or take alternative action
+  print("No 'NA' values found in the Species column.")
+}
+
+if ('unclassified_Fungi' %in% myco_sp_df$Species || 'unidentified' %in% myco_sp_df$Species) {
+  # Trim whitespaces and filter for unclassified/unidentified   Fungi
+  y <- myco_sp_df[trimws(myco_sp_df$Species) == 'unclassified_Fungi',]$Species
+  z <- myco_sp_df[trimws(myco_sp_df$Species) == 'unidentified',]$Species
+
+  # Combine the vectors
+  Unclassified <- c(y, z)
+
+  # Rename
+  myco_sp_df[myco_sp_df$Species %in% Unclassified,]$Species <- 'Unclassified'
+} else {
+  # If 'NA' or 'unclassified' is not present, provide a message or take alternative action
+  print("No 'NA' or 'unclassified' values found in the Species column.")
+}
+```
+
+* make age and type a factor in the df (i.e. change order of facets (flip aged/mid/young) in next step)
+```{r}
+# Rename Mid as Adult
+myco_sp_df$agegroup<-gsub("Mid","Adult",as.character(myco_sp_df$agegroup))
+
+# Reorder agegroup
+myco_sp_df$agegroup <- factor(myco_sp_df$agegroup, levels = c("Young", "Adult", "Aged"))
+
+# Reorder type
+myco_sp_df$type <- factor(myco_sp_df$type, levels=c("Duodenum", "Jejunum", "Ileum", "Caecum", "ProxColon", "DistalColon"))
+
+# Change facet names
+facet_names <- list('Duodenum'='Duodenum',
+                    'Jejunum'='Jejunum',
+                    'Ileum'='Ileum',
+                    'Caecum'='Caecum',
+                    'ProxColon'='PC',
+                    'DistalColon'='DC')
+#create label function
+group_labeller <- function(variable,value){
+  return(facet_names[value])
+}
+
+# Order ids by age (using a unique identifier to account for duplicates in df)
+myco_sp_df <- myco_sp_df[order(myco_sp_df$age, myco_sp_df$name), ]
+myco_sp_df$name <- factor(myco_sp_df$name, levels = unique(myco_sp_df$name))
+```
+
+* Improve aesthetics
+```{r}
+# replace _ with " "
+myco_sp_df$Species<-gsub("_"," ",as.character(myco_sp_df$Species))
+
+# Rename unclassified Debaryomyces as D. hansenii
+myco_sp_df$Species<-gsub("unclassified Debaryomyces","Debaryomyces hansenii",as.character(myco_sp_df$Species))
+
+# Rename K. pintolopesii as Arxiozyma pintolopesii
+myco_sp_df$Species<-gsub("Kazachstania pintolopesii","Arxiozyma pintolopesii",as.character(myco_sp_df$Species))
+
+# Capitalise 'unclassified' species
+myco_sp_df$Species<-gsub("unclassified Aspergillus","Unclassified Aspergillus",as.character(myco_sp_df$Species))
+
+myco_sp_df$Species<-gsub("unclassified Penicillium","Unclassified Penicillium",as.character(myco_sp_df$Species))
+```
+
+* Create stacked bar graph
+```{r}
+# Create the main plot
+sp_plot <- ggplot(myco_sp_df, aes(x = name, y = Abundance * 100, fill = Species)) +
+  theme_light() +
+  geom_col() +
+  facet_grid(~ type, space = "free", scales = "free", labeller = labeller(type = group_labeller)) +
+  ggtitle("Species") +
+  theme(axis.text.x = element_text(angle=90, size=10, hjust=0.95, vjust=0.2), 
+        axis.text.y = element_text(size=10),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        plot.title = element_text(face = "bold", size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        strip.background =element_rect(fill="grey"),
+        strip.text = element_text(size = 12, face = "bold"),  # Adjust the size of facet labels
+        legend.text.align = 0, 
+        legend.text = element_text(size=8.5),
+        legend.title = element_text(size=12),
+        legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 3)) +
+  scale_fill_manual(values = cb_palette) +
+  xlab("Sample ID") + ylab("Relative Abundance (%)") 
+
+# Create the age group annotations plot
+age_group_annotations <- ggplot(myco_sp_df, aes(x = name, fill = agegroup)) +
+  geom_tile(aes(y = -5, height = 3)) +  # Adjust height to fit beneath the main plot
+  scale_fill_manual(values = c("#f4e285", "#f4a259", "#8cb369")) +  # Customize colors as needed
+  facet_grid(~ type, space = "free", scales = "free") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        strip.text = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title = element_blank(),
+        panel.spacing = unit(0.25, "lines"),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 16)) +
+  guides(fill=guide_legend(title="Age Group"))
+
+# Combine the two plots using patchwork
+sp_combined_plot <- sp_plot / age_group_annotations + plot_layout(heights = c(10, 1))
+# Adjust heights as needed
+print(sp_combined_plot)
+
+```
+
+* Export graph
+```{r}
+tiff(file.path(folder_path, "Species_StackedBar.tiff"), units="in", width=12, height=5, res=300)
+plot(sp_plot)
+dev.off()
+```
+
+* Patchwork plot for Family, Genus, Species
+```{r}
+tax_plot2 <- fam_plot / gen_plot / sp_plot + age_group_annotations +
+  plot_layout(heights = c(10, 10, 10, 1))
+tax_plot2
+
+tiff(file.path(folder_path, "Mycobiome_Tax2.tiff"), units="in", width=8.27, height=13, res=300)
+plot(tax_plot2)
+dev.off()
+```
